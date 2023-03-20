@@ -1,0 +1,72 @@
+name: QA (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      portable_tag:
+        description: 'which VS portable tag to test'
+        default: 'vs-2023H1'
+      regexp:
+        description: 'which tests to run?'
+        default: '.'
+
+jobs:
+  QA:
+    strategy:
+      matrix:
+        variant: [ "non-opencl", "opencl", "benchmark" ]
+
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      REGEXP: ${{ github.event.inputs.regexp }}
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ secrets.REPO_ORG }}/${{ secrets.REPO_NAME }}
+        token: ${{ secrets.REPO_TOKEN }}
+        fetch-depth: 0
+
+    - name: Prepare portable
+      run: |
+        echo "We will be testing tag ${{ github.event.inputs.portable_tag }}" | tee -a output.log
+        AUTH="Authorization: token ${{ secrets.REPO_TOKEN }}"
+        curl -s -o vs.json -H "$AUTH" 'https://api.github.com/repos/${{ secrets.REPO_ORG }}/${{ secrets.PORTABLE_REPO_NAME }}/releases/tags/${{ github.event.inputs.portable_tag }}'
+        id=$(jq -r '.assets | .[] | select(.name | startswith("vapoursynth_portable_")) | select(.name | endswith("_cpu.7z")) | .id' < vs.json)
+        ASSET="https://api.github.com/repos/${{ secrets.REPO_ORG }}/${{ secrets.PORTABLE_REPO_NAME }}/releases/assets/$id"
+        curl -LJ -o vs.7z -H "$AUTH" -H 'Accept: application/octet-stream' "$ASSET"
+        7z x vs.7z
+        md5sum vs.7z | tee -a output.log
+        echo "$(cygpath -w $(pwd)/vapoursynth)" >> $GITHUB_PATH
+        rm -f vs.7z vs.json
+
+    - name: Smoke tests
+      run: |
+        echo "regexp = $REGEXP" | tee -a output.log
+        vspipe --version 2>&1 | tee -a output.log
+        python -c "import vapoursynth as vs; print(vs.core.version())" 2>&1 | tee -a output.log
+
+    - name: Run tests
+      run: |
+        export VARIANT=${{ matrix.variant }}
+        export LOG_DIR=$(cygpath -w $(pwd))
+        export REPO_TOKEN="${{ secrets.REPO_TOKEN }}"
+        echo "Testing variant $VARIANT" | tee -a output.log
+        bash ./run.sh 2>&1 | tee -a output.log
+
+    - name: package log
+      if: always()
+      run: 7z a -t7z -p'${{ secrets.LOG_PASSWORD }}' -mx=9 log-${{ matrix.variant }}.7z *.log
+
+    - name: Upload
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: log
+        path: log*.7z
